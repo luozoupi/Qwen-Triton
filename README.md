@@ -178,20 +178,23 @@ This is the current honest state of the repo: correctness first, then performanc
 
 ## Environment
 
-Recommended environment:
+Create a fresh conda environment from the repo root with:
 
 ```bash
-conda activate py310_2
 cd /home/luo00466/Qwen-Triton
+conda env create -f environment.yml
+conda activate qwen-triton
 ```
 
-If `pytest` is missing in `py310_2`, install it once:
+If you already have a Python 3.10 environment and only want the pip packages, install:
 
 ```bash
-python -m pip install pytest
+python -m pip install -r requirements.txt
 ```
 
-Build the CUDA RoPE operator on this Blackwell machine with:
+The validated local debug environment is still `py310_2`, but `environment.yml` and `requirements.txt` are now the repo-supported setup path for new users.
+
+Build the CUDA RoPE operator after the environment is active with:
 
 ```bash
 TORCH_CUDA_ARCH_LIST=12.0 python -m qwen_triton.scripts.build_rope_cuda_op --verbose
