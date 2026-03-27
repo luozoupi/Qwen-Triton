@@ -177,7 +177,11 @@ class QwenTritonModel(nn.Module):
             inputs_embeds = self.embed_tokens(input_ids)
 
         if use_cache and past_key_values is None:
-            past_key_values = QwenTritonCache(self.config.num_hidden_layers, self.config.layer_types)
+            past_key_values = QwenTritonCache(
+                self.config.num_hidden_layers,
+                self.config.layer_types,
+                max_cache_len=self.config.max_position_embeddings,
+            )
 
         if cache_position is None:
             past_seen_tokens = 0 if past_key_values is None else past_key_values.get_seq_length()

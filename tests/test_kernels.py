@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from qwen_triton.kernels import apply_rope, gated_delta_rule_sequence, rmsnorm, sigmoid_mul, silu_mul
+from qwen_triton.kernels import apply_rope, gated_delta_rule_sequence, rmsnorm, sigmoid_mul, silu_mul, write_attention_kv
 from qwen_triton.ops import apply_rope_cuda_op, get_rope_cuda_op_error, load_rope_cuda_op
 
 
@@ -130,6 +130,28 @@ def test_rope_kernel_backward_matches_torch() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for Triton kernel tests")
+def test_rope_kernel_backward_matches_torch_for_gqa_bf16() -> None:
+    q = torch.randn(2, 4, 5, 16, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn(2, 2, 5, 16, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    ref_q = q.detach().clone().requires_grad_(True)
+    ref_k = k.detach().clone().requires_grad_(True)
+    cos = torch.randn(2, 5, 8, device="cuda", dtype=torch.bfloat16)
+    sin = torch.randn(2, 5, 8, device="cuda", dtype=torch.bfloat16)
+    grad_q = torch.randn_like(q)
+    grad_k = torch.randn_like(k)
+
+    actual_q, actual_k = apply_rope(q, k, cos, sin, use_triton=True, backend="triton")
+    expected_q, expected_k = apply_rope(ref_q, ref_k, cos, sin, use_triton=False, backend="torch")
+    (actual_q.float() * grad_q.float()).sum().backward(retain_graph=True)
+    (actual_k.float() * grad_k.float()).sum().backward()
+    (expected_q.float() * grad_q.float()).sum().backward(retain_graph=True)
+    (expected_k.float() * grad_k.float()).sum().backward()
+
+    torch.testing.assert_close(q.grad.float(), ref_q.grad.float(), atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(k.grad.float(), ref_k.grad.float(), atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for Triton kernel tests")
 def test_rope_kernel_matches_torch_for_gqa_bf16() -> None:
     q = torch.randn(2, 4, 5, 16, device="cuda", dtype=torch.bfloat16)
     k = torch.randn(2, 2, 5, 16, device="cuda", dtype=torch.bfloat16)
@@ -153,6 +175,18 @@ def test_rope_cuda_custom_op_matches_torch_for_gqa_bf16() -> None:
     actual_q, actual_k = apply_rope_cuda_op(q, k, cos, sin)
     torch.testing.assert_close(actual_q.float(), expected_q.float(), atol=2e-2, rtol=2e-2)
     torch.testing.assert_close(actual_k.float(), expected_k.float(), atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for Triton kernel tests")
+def test_write_attention_kv_matches_torch_update() -> None:
+    cache = torch.zeros(2, 3, 16, 8, device="cuda", dtype=torch.float32)
+    values = torch.randn(2, 3, 5, 8, device="cuda", dtype=torch.float32)
+    positions = torch.tensor([0, 1, 4, 7, 8], device="cuda", dtype=torch.long)
+    expected = cache.clone()
+    expected[:, :, positions, :] = values
+    actual = cache.clone()
+    write_attention_kv(actual, values, positions)
+    torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-4)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for Triton kernel tests")

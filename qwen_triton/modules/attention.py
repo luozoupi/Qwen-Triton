@@ -48,7 +48,6 @@ class QwenFullAttention(nn.Module):
         past_key_values: Optional[QwenTritonCache] = None,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> torch.Tensor:
-        del cache_position
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
         mixed_q = self.q_proj(hidden_states)
@@ -72,7 +71,12 @@ class QwenFullAttention(nn.Module):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_values is not None:
-            key_states, value_states = past_key_values.update_attention(self.layer_idx, key_states, value_states)
+            key_states, value_states = past_key_values.update_attention(
+                self.layer_idx,
+                key_states,
+                value_states,
+                cache_position=cache_position,
+            )
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)

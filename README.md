@@ -20,9 +20,12 @@ Important: `backend="triton"` currently means "repo-owned hybrid backend", not "
 - Fine-tuning correctness bug fixed:
   - the original Triton RMSNorm / SiLU-mul / RoPE path was forward-only
   - this broke autograd and caused long-run training drift
-  - Triton backward kernels now exist for RMSNorm and SiLU-mul
-  - RoPE backward still uses an explicit analytical path
+  - Triton backward kernels now exist for RMSNorm, SiLU-mul, and RoPE
   - training now matches the reference path again
+- Decode cache path improved:
+  - full-attention KV cache no longer has to grow by append-and-copy on every decode step
+  - cache storage is now reused with write-by-position updates and capacity growth
+  - this keeps the repo-owned generation path closer to a real serving cache design
 - Checkpoint load path improved:
   - repo load no longer random-initializes the whole model before loading checkpoint tensors
   - this reduced Triton load time materially on the tested Qwen3-0.6B path
@@ -73,7 +76,7 @@ Dense Qwen3 is the most validated path today.
 - Q/K/V/O projections are standard PyTorch `nn.Linear`
 - Q/K head normalization is repo-owned RMSNorm
 - rotary embedding is repo-owned and can run with Triton or a CUDA custom op
-- KV cache update is repo-owned
+- KV cache update is repo-owned and now uses preallocated write-by-position storage
 - attention score/value computation uses `torch.nn.functional.scaled_dot_product_attention`
 
 That design keeps the architecture under repo control while deferring the biggest kernel work until the surrounding model behavior is stable.
@@ -480,8 +483,8 @@ Profiler artifacts:
 
 If the goal is to move from "correct and runnable" to "actually faster than baseline", the highest-value next steps are:
 
-1. Add a real Triton RoPE backward path so the full RoPE training path stays off the torch elementwise stack.
-2. Reduce Triton startup/warmup cost by caching or precompiling frequently used kernel shapes.
-3. Move the attention path away from Torch SDPA toward a repo-owned Triton attention implementation.
-4. Replace append-style decode KV cache growth with a preallocated cache write path.
+1. Reduce Triton startup/warmup cost by caching or precompiling frequently used kernel shapes.
+2. Move the attention path away from Torch SDPA toward a repo-owned Triton attention implementation.
+3. Tritonize more Qwen3.5 linear-attention sub-ops so that mixed-layer Qwen3.5 paths stop leaning on generic torch elementwise work.
+4. Add decode-time microbenchmarks and profiling focused on cache reuse and token-by-token generation throughput.
 5. Keep load-time work off the critical path by further optimizing weight mapping and device transfer.

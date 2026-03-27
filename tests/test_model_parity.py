@@ -39,6 +39,47 @@ def test_qwen3_dense_tiny_parity() -> None:
     torch.testing.assert_close(our_logits, hf_logits, atol=1e-5, rtol=1e-4)
 
 
+def test_qwen3_dense_tiny_cached_decode_matches_full_forward() -> None:
+    torch.manual_seed(0)
+    config = Qwen3Config(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=64,
+        tie_word_embeddings=False,
+    )
+    hf_model = Qwen3ForCausalLM(config).eval()
+    our_model = QwenTritonForCausalLM.from_config(config).eval()
+    _assert_state_loads(our_model, hf_model)
+
+    prompt_ids = torch.randint(0, config.vocab_size, (1, 5))
+    next_ids = torch.randint(0, config.vocab_size, (1, 1))
+    prompt_mask = torch.ones_like(prompt_ids)
+    full_ids = torch.cat((prompt_ids, next_ids), dim=-1)
+    full_mask = torch.ones_like(full_ids)
+
+    with torch.no_grad():
+        prompt_out = our_model(input_ids=prompt_ids, attention_mask=prompt_mask, use_cache=True)
+        prompt_cache_len = prompt_out.past_key_values.get_seq_length()
+        cached_out = our_model(
+            input_ids=next_ids,
+            attention_mask=full_mask,
+            past_key_values=prompt_out.past_key_values,
+            use_cache=True,
+            logits_to_keep=1,
+        )
+        full_out = our_model(input_ids=full_ids, attention_mask=full_mask, use_cache=False, logits_to_keep=1)
+
+    torch.testing.assert_close(cached_out.logits, full_out.logits, atol=1e-5, rtol=1e-4)
+    assert prompt_cache_len == prompt_ids.shape[1]
+    assert cached_out.past_key_values.get_seq_length() == full_ids.shape[1]
+    assert cached_out.past_key_values.key_cache[0].shape[-2] >= full_ids.shape[1]
+
+
 def test_qwen3_moe_tiny_parity() -> None:
     torch.manual_seed(0)
     config = Qwen3MoeConfig(
