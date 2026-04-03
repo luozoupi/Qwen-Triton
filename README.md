@@ -1,13 +1,14 @@
 # Qwen-Triton
 
-Qwen-Triton is a repo-owned Qwen3/Qwen3.5 bring-up where the dense Qwen3 inference and training path is **fully implemented in Triton** -- every operator from embedding lookup through cross-entropy loss runs through a repo-owned Triton kernel on GPU.
+Qwen-Triton is a repo-owned Qwen3/Qwen3.5 bring-up where both the dense and MoE Qwen3 paths are **fully implemented in Triton** -- every operator from embedding lookup through cross-entropy loss, including MoE expert routing (topk, one-hot, scatter-add), runs through a repo-owned Triton kernel on GPU.
 
-The current validated target is text-only `Qwen/Qwen3-0.6B-Base`. Dense Qwen3 checkpoint load, forward, generation, and short Wikitext fine-tuning all run on GPU with zero `nn.Linear` or `nn.Embedding` modules remaining. Qwen3 MoE and Qwen3.5 text-family support are scaffolded in the config and module layers, but they have not yet been profiled and benchmarked as thoroughly as dense Qwen3.
+The current validated target is text-only `Qwen/Qwen3-0.6B-Base`. Dense Qwen3 checkpoint load, forward, generation, and short Wikitext fine-tuning all run on GPU with zero `nn.Linear` or `nn.Embedding` modules remaining. The MoE path (`QwenSparseMoeBlock`) is also fully Tritonized -- gate projections, routing softmax, top-k selection, one-hot dispatch, expert MLPs, and weighted scatter-add all use Triton kernels. Qwen3.5 text-family support is scaffolded in the config and module layers but has not yet been validated as deeply.
 
 ## Current Status
 
 - Validated model target: `Qwen/Qwen3-0.6B-Base`
 - **Full Triton dense path**: all 197 linear projections use `TritonLinear`, embedding uses `TritonEmbedding`, attention uses Triton Flash Attention v2, loss uses Triton cross-entropy, residual connections use Triton element-wise add
+- **Full Triton MoE path**: gate projection (`TritonLinear`), routing softmax (`triton_softmax`), top-k selection (`triton_topk`), one-hot dispatch (`triton_one_hot`), weighted scatter-add (`triton_index_add`), shared expert gating (`sigmoid_mul`), and all expert MLPs (`TritonLinear` + Triton SiLU-mul)
 - Strict Triton mode (`QWEN_TRITON_STRICT=1`): forward + backward pass with zero PyTorch fallbacks
 - Working backends:
   - `ref`: upstream Hugging Face model for parity and baseline measurement
@@ -80,14 +81,25 @@ Dense MLP is fully Triton:
 - `gate_proj` / `up_proj` / `down_proj` all use `TritonLinear`
 - Fused SiLU-mul epilogue uses Triton kernel
 
-MoE and Qwen3.5 linear-attention blocks are scaffolded so the repo can represent:
+Sparse MoE (`QwenSparseMoeBlock`) is fully Triton:
+
+- Gate projection uses `TritonLinear`
+- Routing weights computed via `triton_softmax`
+- Expert selection via `triton_topk` (specialized k=2 fast path + general)
+- Dispatch mask via `triton_one_hot`
+- Weighted scatter-add via `triton_index_add` (Triton atomic adds with autograd wrapper)
+- Shared expert gating via `sigmoid_mul` Triton kernel
+- Each expert MLP is a `QwenMLP` with `TritonLinear` projections + Triton SiLU-mul
+- Only `torch.where` / `torch.nonzero` remain as PyTorch (lightweight expert-hit detection, not compute)
+
+Qwen3.5 linear-attention blocks are scaffolded so the repo can represent:
 
 - dense Qwen3
 - sparse Qwen3 MoE
 - Qwen3.5 text blocks with mixed layer types
 - shared-expert style Qwen3.5 text-family MoE
 
-The dense Qwen3 path is the only path fully exercised end-to-end on a real checkpoint in this README.
+The dense Qwen3 path is the most validated. MoE routing has been tested with tiny configs (4 experts, top-2, forward + backward, 20 seeds, 0 NaN). Qwen3.5 paths are scaffolded but not yet deeply validated.
 
 ### 5. Triton and CUDA Kernels
 
@@ -107,6 +119,9 @@ Complete repo-owned Triton kernel inventory:
 | **Embedding** | `kernels/embedding.py` | Triton | Triton | Token embedding lookup |
 | **Cross-Entropy** | `kernels/cross_entropy.py` | Triton | Triton | Fused softmax + NLL loss |
 | **Residual Add** | `kernels/residual_add.py` | Triton | Identity | Element-wise residual connection |
+| **Top-K** | `kernels/moe_routing.py` | Triton | Scatter | MoE expert selection (fast k=2 path) |
+| **One-Hot** | `kernels/moe_routing.py` | Triton | N/A | MoE dispatch mask |
+| **Index-Add** | `kernels/moe_routing.py` | Triton | Gather | MoE weighted scatter-add |
 
 Explicit CUDA custom operator (optional):
 
@@ -154,7 +169,7 @@ The Triton path intentionally avoids reusing the upstream HF module tree. That k
 - `qwen_triton/modules`
   - decoder blocks, attention, rotary, MLP, MoE, cache, TritonLinear, TritonEmbedding
 - `qwen_triton/kernels`
-  - Triton kernels and their runtime wrappers (12 kernel files)
+  - Triton kernels and their runtime wrappers (13 kernel files)
 - `qwen_triton/ops`
   - Python loader/wrapper for custom CUDA operators
 - `qwen_triton/csrc`
@@ -341,7 +356,8 @@ Profiler artifacts:
 - Flash Attention uses fixed block sizes (BLOCK_M=32, BLOCK_N=32) to stay within shared memory limits. Larger block sizes would improve throughput on GPUs with more shared memory.
 - Embedding backward uses atomic scatter-add, which may contend under large batch sizes with repeated tokens.
 - Triton kernel autotune warmup adds significant startup cost compared to the reference backend.
-- Qwen3.5 text-family and MoE paths are represented in code but not yet converted to full Triton.
+- MoE routing uses a Python-level loop over active experts; fusing the full dispatch into a single Triton kernel would reduce launch overhead.
+- Qwen3.5 text-family linear-attention paths are scaffolded but not yet deeply validated.
 - `ncu` currently prints a post-disconnect `utf-8-sig` traceback on this machine even when profiling succeeds and metrics are emitted.
 
 ## Next Performance Work
@@ -351,7 +367,8 @@ Now that the dense Qwen3 path is fully Triton, the highest-value next steps are:
 1. **Tune Triton GEMM**: Add more autotune configs and split-K for shapes where Triton matmul significantly underperforms cuBLAS.
 2. **Tune Flash Attention**: Increase block sizes on GPUs with larger shared memory; add sliding-window attention kernel variant.
 3. **Reduce startup cost**: Cache compiled Triton kernels or precompile frequently used shapes.
-4. **Extend to MoE**: Convert `QwenSparseMoeBlock` expert routing and expert MLPs to use `TritonLinear` and Triton softmax.
+4. **Fuse MoE dispatch**: Replace the Python expert loop with a fused Triton kernel that processes all experts in one launch.
 5. **Extend to Qwen3.5**: Tritonize the remaining linear-attention sub-ops and mixed-layer paths.
 6. **Fused LM head + CE**: Combine the final linear projection with cross-entropy to avoid materializing the full vocab logits tensor.
 7. **Decode optimization**: Add token-by-token generation microbenchmarks and optimize the cache-hit path.
+8. **MoE checkpoint validation**: Load a real Qwen3 MoE checkpoint and validate end-to-end parity + training.
