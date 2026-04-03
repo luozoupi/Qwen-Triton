@@ -4,6 +4,7 @@ from .embedding import triton_embedding
 from .flash_attention import triton_flash_attention
 from .linear_attention import gated_delta_rule_sequence
 from .matmul import triton_matmul
+from .moe_routing import triton_index_add, triton_one_hot, triton_topk
 from .residual_add import residual_add
 from .rmsnorm import rmsnorm
 from .rope import apply_rope
@@ -19,6 +20,9 @@ __all__ = [
     "triton_flash_attention",
     "gated_delta_rule_sequence",
     "triton_matmul",
+    "triton_index_add",
+    "triton_one_hot",
+    "triton_topk",
     "residual_add",
     "rmsnorm",
     "apply_rope",

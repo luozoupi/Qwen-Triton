@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from qwen_triton.configs import QwenTritonConfig
+from qwen_triton.kernels.moe_routing import triton_index_add, triton_one_hot, triton_topk
 from qwen_triton.kernels.sigmoid_mul import sigmoid_mul
 from qwen_triton.kernels.softmax import triton_softmax
 from qwen_triton.modules.linear import TritonLinear
@@ -33,20 +34,20 @@ class QwenSparseMoeBlock(nn.Module):
         flat_hidden = hidden_states.view(-1, hidden_dim)
         router_logits = self.gate(flat_hidden)
         routing_weights = triton_softmax(router_logits.float())
-        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+        routing_weights, selected_experts = triton_topk(routing_weights, self.top_k)
         if self.norm_topk_prob:
             routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
         routing_weights = routing_weights.to(flat_hidden.dtype)
 
         final_hidden = torch.zeros_like(flat_hidden)
-        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+        expert_mask = triton_one_hot(selected_experts, self.num_experts).permute(2, 1, 0)
         expert_hit = torch.nonzero(expert_mask.sum(dim=(-1, -2)) > 0, as_tuple=False).view(-1)
 
         for expert_idx in expert_hit.tolist():
             expert_layer = self.experts[expert_idx]
             idx, top_x = torch.where(expert_mask[expert_idx])
             current_hidden = expert_layer(flat_hidden[top_x]) * routing_weights[top_x, idx, None]
-            final_hidden.index_add_(0, top_x, current_hidden.to(flat_hidden.dtype))
+            final_hidden = triton_index_add(final_hidden, current_hidden.to(flat_hidden.dtype), top_x)
 
         if self.shared_expert is not None and self.shared_expert_gate is not None:
             shared_hidden = self.shared_expert(flat_hidden)
