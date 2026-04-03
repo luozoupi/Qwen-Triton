@@ -10,6 +10,8 @@ from transformers import AutoModelForCausalLM
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from qwen_triton.configs import QwenTritonConfig
+from qwen_triton.kernels.cross_entropy import triton_cross_entropy
+from qwen_triton.kernels.residual_add import residual_add
 from qwen_triton.loaders import ensure_local_model_path, load_config_dict, load_hf_weights_into_model
 from qwen_triton.modules import (
     Qwen3NextLinearAttention,
@@ -20,6 +22,8 @@ from qwen_triton.modules import (
     QwenSparseMoeBlock,
     QwenTritonCache,
 )
+from qwen_triton.modules.embedding import TritonEmbedding
+from qwen_triton.modules.linear import TritonLinear
 
 
 def _parse_dtype(dtype: torch.dtype | str | None) -> torch.dtype | None:
@@ -81,7 +85,7 @@ def _layer_uses_moe(config: QwenTritonConfig, layer_idx: int) -> bool:
 def _loss_fn(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     shift_logits = logits[:, :-1].contiguous()
     shift_labels = labels[:, 1:].contiguous()
-    return F.cross_entropy(
+    return triton_cross_entropy(
         shift_logits.view(-1, shift_logits.shape[-1]),
         shift_labels.view(-1),
         ignore_index=-100,
@@ -138,14 +142,14 @@ class QwenDecoderLayer(nn.Module):
                 cache_position=cache_position,
             )
 
-        hidden_states = residual + hidden_states
+        hidden_states = residual_add(hidden_states, residual)
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         router_logits = None
         hidden_states = self.mlp(hidden_states)
         if isinstance(hidden_states, tuple):
             hidden_states, router_logits = hidden_states
-        hidden_states = residual + hidden_states
+        hidden_states = residual_add(hidden_states, residual)
         return hidden_states, router_logits
 
 
@@ -153,7 +157,7 @@ class QwenTritonModel(nn.Module):
     def __init__(self, config: QwenTritonConfig) -> None:
         super().__init__()
         self.config = config
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
+        self.embed_tokens = TritonEmbedding(config.vocab_size, config.hidden_size, config.pad_token_id)
         self.layers = nn.ModuleList([QwenDecoderLayer(config, idx) for idx in range(config.num_hidden_layers)])
         self.norm = QwenRMSNorm(config.hidden_size, eps=config.rms_norm_eps, one_plus_weight=config.norm_one_plus)
         self.rotary_emb = QwenRotaryEmbedding(config)
@@ -252,7 +256,7 @@ class QwenTritonForCausalLM(nn.Module):
         self.backend = backend
         self.ref_model = None
         self.model = QwenTritonModel(config)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = TritonLinear(config.hidden_size, config.vocab_size, bias=False)
         if init_weights:
             self._reset_parameters()
         if config.tie_word_embeddings:
@@ -260,11 +264,11 @@ class QwenTritonForCausalLM(nn.Module):
 
     def _reset_parameters(self) -> None:
         for module in self.modules():
-            if isinstance(module, nn.Linear):
+            if isinstance(module, (nn.Linear, TritonLinear)):
                 nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.Embedding):
+            elif isinstance(module, (nn.Embedding, TritonEmbedding)):
                 nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
 
     @classmethod

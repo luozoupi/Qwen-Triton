@@ -1,5 +1,7 @@
 from .attention import QwenFullAttention, repeat_kv
 from .cache import QwenTritonCache
+from .embedding import TritonEmbedding
+from .linear import TritonLinear
 from .linear_attention import Qwen3NextLinearAttention
 from .mlp import QwenMLP
 from .moe import QwenSparseMoeBlock
@@ -15,6 +17,8 @@ __all__ = [
     "QwenRMSNorm",
     "QwenRMSNormGated",
     "QwenRotaryEmbedding",
+    "TritonEmbedding",
+    "TritonLinear",
     "apply_rotary_pos_emb",
     "repeat_kv",
 ]
