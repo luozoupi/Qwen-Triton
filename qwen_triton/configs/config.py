@@ -29,7 +29,7 @@ def _default_layer_types(
 
 
 def _normalize_family(source_model_type: str, text_cfg: Mapping[str, Any]) -> str:
-    num_experts = int(text_cfg.get("num_experts", 0) or 0)
+    num_experts = int(text_cfg.get("num_experts") or text_cfg.get("num_local_experts") or 0)
     shared_expert = int(text_cfg.get("shared_expert_intermediate_size", 0) or 0)
 
     if source_model_type == "qwen3":
@@ -186,7 +186,7 @@ class QwenTritonConfig:
             moe_intermediate_size=int(text_cfg.get("moe_intermediate_size", 0) or 0),
             shared_expert_intermediate_size=int(text_cfg.get("shared_expert_intermediate_size", 0) or 0),
             num_experts_per_tok=int(text_cfg.get("num_experts_per_tok", 0) or 0),
-            num_experts=int(text_cfg.get("num_experts", 0) or 0),
+            num_experts=int(text_cfg.get("num_experts") or text_cfg.get("num_local_experts") or 0),
             norm_topk_prob=bool(text_cfg.get("norm_topk_prob", False)),
             router_aux_loss_coef=float(text_cfg.get("router_aux_loss_coef", 0.0)),
             mlp_only_layers=list(text_cfg.get("mlp_only_layers") or []),

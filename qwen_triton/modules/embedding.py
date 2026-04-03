@@ -13,6 +13,10 @@ class TritonEmbedding(nn.Module):
         self.embedding_dim = embedding_dim
         self.padding_idx = padding_idx
         self.weight = nn.Parameter(torch.empty(num_embeddings, embedding_dim))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.normal_(self.weight)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         return triton_embedding(input_ids, self.weight, self.padding_idx)
